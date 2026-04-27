@@ -1,81 +1,89 @@
 # -*- coding: utf-8 -*-
 """
 ships_to_csv.py
----------------
+===============
 Parses a SHIPS lsdiag predictor file (any basin, any year range) and writes
-one CSV row per storm cycle containing:
+one CSV row per storm cycle containing storm metadata from the HEAD record
+and 25 environmental predictor values at t=0 (current cycle time only).
 
-  • Storm metadata from the HEAD line (for exact matching with HRDOBS)
-  • 25 environmental predictor values at t=0 (current cycle time only)
-
-Usage
+USAGE
 -----
     python ships_to_csv.py <input_lsdiag_file> [output_csv_file] [start_year] [end_year]
 
     start_year and end_year are optional integers.  When provided, only cycles
     whose year falls within [start_year, end_year] inclusive are written.
     The parser stops reading the file as soon as it encounters the first HEAD
-    line whose year exceeds end_year, so processing is efficient even on the
+    line whose year exceeds end_year, so processing is efficient even on
     full multi-decade lsdiag files.
 
-File format assumptions
------------------------
-Each data row contains 31 values in fixed-width 5-character fields covering
-times -12, -6, 0, 6, 12 ... 168 hr relative to the cycle time.  The t=0
-value is therefore always at character positions [10:15].  The row label
-is the rightmost alphabetically-starting token on the line.
+    If output_csv_file is omitted, the output is written to the same directory
+    as the input file with a .csv extension.
 
-Special-format rows (PSLV, MTPW, HIST, IR**, PC**, LAST) are skipped — they
-do not follow the standard 31-column layout.
+FILE FORMAT
+-----------
+Each data row contains 31 values in fixed-width 5-character fields covering
+times -12, -6, 0, 6, 12, ... 168 hr relative to the cycle time.  The t=0
+value is always at character positions [10:15].  The row label is the
+rightmost alphabetically-starting token on the line.
+
+Special-format rows (PSLV, MTPW, HIST, IR**, PC**, LAST) are skipped because
+they do not follow the standard 31-column layout.
 
 Missing values (9999 or blank) are written as empty strings in the CSV.
 
-Scaling applied to convert stored integers to physical units
-------------------------------------------------------------
+SCALING
+-------
+Stored integer values are converted to physical units as follows:
+
 Variable     Stored unit              Conversion              Output unit
-CSST         deg C * 10              ÷ 10                    deg C
-CD20/CD26    m (no scale)            —                       m
-COHC         kJ/cm² (no scale)       —                       kJ/cm²
-DTL          km (no scale)           —                       km
-OAGE/NAGE    hr * 10                 ÷ 10                    hr
-INCV         kt (no scale)           —                       kt
-SHRD/SHDC    kt * 10                 ÷ 10                    kt
-SHTD/SDDC    deg (no scale)          —                       deg
-RHLO/MD/HI   % (no scale)            —                       %
-VMPI         kt (no scale)           —                       kt
-PENV/PENC    (hPa - 1000) * 10       ÷ 10 + 1000             hPa
-Z850         s⁻¹ * 10⁷               —  (kept as stored)     10⁻⁷ s⁻¹
-D200         s⁻¹ * 10⁷               —  (kept as stored)     10⁻⁷ s⁻¹
-U200         kt * 10                 ÷ 10                    kt
-DSST/NSST    deg C * 10              ÷ 10                    deg C
-NOHC         kJ/cm² (no scale)       —                       kJ/cm²
+CSST         deg C * 10              / 10                    deg C
+CD20/CD26    m (no scale)            --                       m
+COHC         kJ/cm2 (no scale)       --                       kJ/cm2
+DTL          km (no scale)           --                       km
+OAGE/NAGE    hr * 10                 / 10                    hr
+INCV         kt (no scale)           --                       kt
+SHRD/SHDC    kt * 10                 / 10                    kt
+SHTD/SDDC    deg (no scale)          --                       deg
+RHLO/MD/HI   % (no scale)            --                       %
+VMPI         kt (no scale)           --                       kt
+PENV/PENC    (hPa - 1000) * 10       / 10 + 1000             hPa
+Z850         s^-1 * 10^7             -- (kept as stored)      10^-7 s^-1
+D200         s^-1 * 10^7             -- (kept as stored)      10^-7 s^-1
+U200         kt * 10                 / 10                    kt
+DSST/NSST    deg C * 10              / 10                    deg C
+NOHC         kJ/cm2 (no scale)       --                       kJ/cm2
 
-Notes on specific variables
----------------------------
-INCV at t=0 : intensity change from -6 to 0 hr — the 6-hour intensification
-              rate immediately before the current cycle.  This is the most
-              useful "recent change" metric since DELV is trivially 0 at t=0.
-              Coverage ~78% (missing when storm has no prior 6-h record).
+NOTES ON SPECIFIC VARIABLES
+----------------------------
+INCV at t=0 : intensity change from -6 to 0 hr -- the 6-hour intensification
+              rate immediately before the current cycle.  Missing when the
+              storm has no prior 6-hour record.
 
-Z850/D200   : retained in the stored integer units (×10⁷) rather than
-              converted to true SI values (~10⁻⁶) which are awkward in CSV.
-              Divide by 10,000,000 to obtain s⁻¹.
+Z850/D200   : retained in the stored integer units (x10^7) rather than
+              converted to SI values, which are awkward in CSV format.
+              Divide by 10,000,000 to obtain s^-1.
 
-PENV/PENC   : the stored value is (hPa − 1000) × 10 so very negative values
-              (e.g. −690) represent pressures below 1000 hPa by 69 hPa.
+PENV/PENC   : the stored value is (hPa - 1000) x 10, so very negative values
+              (e.g. -690) represent pressures below 1000 hPa by 69 hPa.
 
-LON convention : longitude from the HEAD line is stored as degrees West.
-                 It is written to the CSV as a negative value (degrees East)
-                 to match the HRDOBS convention.
+Longitude   : the HEAD line stores longitude as degrees West.  It is written
+              to the CSV as a negative value (degrees East) to match the
+              HRDOBS sign convention.
 
-Matching with HRDOBS
+MATCHING WITH HRDOBS
 --------------------
 The CSV columns 'hrdobs_storm_id' and 'datetime_utc' together form the
-unique key that matches each row to an HRDOBS cycle file:
+unique key that matches each row to an HRDOBS AI-Ready cycle file:
 
-    HRDOBS filename:  HRDOBS_<hrdobs_storm_id>.<YYYYMMDDHHMMSS>_AI_READY.hdf5
-    HRDOBS metadata:  storm_id  =  hrdobs_storm_id
+    HRDOBS filename : HRDOBS_<hrdobs_storm_id>.<YYYYMMDDHHMMSS>_AI_READY.hdf5
+    HRDOBS metadata : storm_id       = hrdobs_storm_id
                       storm_datetime = datetime_utc
+
+DATASET REFERENCE
+-----------------
+For a full description of the HRDOBS AI-Ready dataset structure, variable
+definitions, and quality-control procedures, refer to the accompanying
+manuscript and dataset documentation.
 """
 
 import sys
@@ -86,17 +94,16 @@ from pathlib import Path
 
 
 # =============================================================================
-# CONFIGURATION — target variables and their scaling
+# CONFIGURATION -- target variables and their scaling
 # =============================================================================
 
-# Each entry: label → (csv_column_name, scale_fn, description)
+# Each entry: SHIPS_label -> (csv_column_name, scale_fn, description)
 # scale_fn receives the raw integer and returns the physical value.
-# Returning None signals "keep as-is (no conversion)".
 
 MISSING = 9999
 
 TARGET_VARS = {
-    # ── Storm state & history (100 % coverage) ─────────────────────────────
+    # -- Storm state and history ----------------------------------------------
     'TYPE':  ('type',
               lambda v: v,
               'Storm type: 0=wave/remnant/dissipating, 1=tropical, '
@@ -104,7 +111,7 @@ TARGET_VARS = {
 
     'INCV':  ('incv_kt',
               lambda v: v,
-              'Intensity change -6 to 0 hr (kt); past 6-h intensification rate'),
+              'Intensity change -6 to 0 hr (kt); past 6-hour intensification rate'),
 
     'CSST':  ('csst_degc',
               lambda v: round(v / 10.0, 1),
@@ -134,7 +141,7 @@ TARGET_VARS = {
               lambda v: round(v / 10.0, 1),
               'Intensity-weighted ocean age (hr); equals OAGE when Vmax=100 kt'),
 
-    # ── Atmospheric environment (91 % coverage) ─────────────────────────────
+    # -- Atmospheric environment ----------------------------------------------
     'SHRD':  ('shrd_kt',
               lambda v: round(v / 10.0, 1),
               '850-200 hPa shear magnitude (kt), r=200-800 km'),
@@ -188,7 +195,7 @@ TARGET_VARS = {
               lambda v: round(v / 10.0, 1),
               '200 hPa zonal wind (kt), r=200-800 km; negative=easterly'),
 
-    # ── Ocean analysis (91 % coverage) ──────────────────────────────────────
+    # -- Ocean analysis -------------------------------------------------------
     'DSST':  ('dsst_degc',
               lambda v: round(v / 10.0, 1),
               'Daily Reynolds SST along track (deg C)'),
@@ -202,7 +209,7 @@ TARGET_VARS = {
               'NCODA ocean heat content relative to 26 deg C isotherm (kJ/cm2)'),
 }
 
-# Lines that do not follow the standard 31-column layout — skip entirely
+# Lines that do not follow the standard 31-column layout -- skip entirely
 SKIP_LABELS = {
     'TIME', 'HIST', 'PSLV', 'MTPW',
     'IRXX', 'IR00', 'IRM1', 'IRM3',
@@ -210,18 +217,18 @@ SKIP_LABELS = {
     'LAST',
 }
 
-# CSV column names (after scaling) whose physical values must always be >= 0.
+# CSV column names whose physical values must always be >= 0.
 # Any negative value after scaling is treated as a missing-value sentinel and
-# written as an empty string.  This catches non-standard sentinels such as the
-# -999 that appears in DTL in some source files.
+# written as an empty string.  This guards against non-standard sentinel values
+# (e.g., -999 in DTL) that appear in some source files.
 #
-# Excluded intentionally (negative values are physically valid):
-#   incv_kt        — weakening produces negative intensity change
-#   z850_1e7_per_s — anticyclonic vorticity is negative
-#   d200_1e7_per_s — convergence is negative divergence
-#   u200_kt        — easterly upper-level flow is negative
-#   penv_hpa/penc_hpa — after conversion always > 900 hPa, no sentinels expected
-#   csst/dsst/nsst_degc — SST can be legitimately near 0 in high-latitude cases
+# Variables intentionally excluded from this set (negative values are
+# physically meaningful):
+#   incv_kt        -- weakening produces negative intensity change
+#   z850_1e7_per_s -- anticyclonic vorticity is negative
+#   d200_1e7_per_s -- convergence is negative divergence
+#   u200_kt        -- easterly upper-level flow is negative
+#   csst/dsst/nsst_degc -- SST can be near 0 in high-latitude cases
 NON_NEGATIVE_COLS = {
     # Ocean thermal structure
     'cd20_m', 'cd26_m', 'cohc_kjcm2', 'nohc_kjcm2',
@@ -303,7 +310,7 @@ def parse_head(line):
         mslp_hpa  = float(parts[6])
         atcf_id   = parts[7].strip()
 
-        # Parse date — YYMMDD where YY is 2-digit (assume 1900s<2000, 00s+≥2000)
+        # Parse date -- YYMMDD where YY is 2-digit (assume 1900s<2000, 00s+>=2000)
         yy = int(yymmdd[0:2])
         mm = int(yymmdd[2:4])
         dd = int(yymmdd[4:6])
@@ -331,7 +338,7 @@ def parse_head(line):
             'datetime_utc':    datetime_utc,
             'vmax_hd_kt':      vmax_kt,
             'lat_hd_degN':     lat_degN,
-            'lon_hd_degE':     -lon_degW,   # convert W→E for HRDOBS convention
+            'lon_hd_degE':     -lon_degW,   # convert W->E for HRDOBS convention
             'mslp_hd_hpa':     mslp_hpa,
         }
     except (ValueError, IndexError):
@@ -372,7 +379,7 @@ def parse_ships_file(input_path, start_year=None, end_year=None):
             if label is None:
                 continue
 
-            # ── Cycle boundaries ────────────────────────────────────────
+            # -- Cycle boundaries ----------------------------------------
             if label == 'HEAD':
                 meta = parse_head(line)
                 if meta is None:
@@ -419,13 +426,13 @@ def parse_ships_file(input_path, start_year=None, end_year=None):
                 current_vars = {}
                 continue
 
-            # ── Skip non-standard lines ──────────────────────────────────
+            # -- Skip non-standard lines ----------------------------------
             if label in SKIP_LABELS:
                 continue
             if current_meta is None:
                 continue
 
-            # ── Extract t=0 for target variables ────────────────────────
+            # -- Extract t=0 for target variables ------------------------
             if label in TARGET_VARS:
                 t0 = extract_t0(line)
                 if t0 is not None:
@@ -441,7 +448,7 @@ def parse_ships_file(input_path, start_year=None, end_year=None):
 def write_csv(cycles, output_path):
     """Write the list of cycle dicts to a CSV file."""
     if not cycles:
-        print("No cycles parsed — output file not written.")
+        print("No cycles parsed -- output file not written.")
         return
 
     # Column order: metadata first, then variables in TARGET_VARS order
@@ -459,15 +466,14 @@ def write_csv(cycles, output_path):
         # Header row
         writer.writeheader()
 
-        # Write a human-readable units/description row as a comment block
-        # at the top of the file so tools that skip '#' lines can still
-        # load the CSV cleanly.
+        # Write a human-readable units/description block as commented lines
+        # at the top of the file so tools that skip '#' lines load cleanly.
         fh.write('#\n')
         fh.write('# Column descriptions and units:\n')
         fh.write('#   storm_name      : 4-character NHC storm name\n')
         fh.write('#   atcf_id         : ATCF storm ID (e.g. AL012014)\n')
         fh.write('#   hrdobs_storm_id : HRDOBS-format storm ID (e.g. ARTH01L) '
-                 '— use with datetime_utc to match HRDOBS cycles\n')
+                 '-- use with datetime_utc to match HRDOBS cycles\n')
         fh.write('#   year/month/day/hour : cycle date and UTC hour\n')
         fh.write('#   datetime_utc    : ISO-8601 cycle time (matches HRDOBS storm_datetime)\n')
         fh.write('#   vmax_hd_kt      : max surface wind from HEAD (kt)\n')
@@ -481,7 +487,7 @@ def write_csv(cycles, output_path):
         # Data rows
         writer.writerows(cycles)
 
-    print(f"✅ Written {len(cycles)} cycles → {output_path}")
+    print(f"[OK] Written {len(cycles)} cycles -> {output_path}")
 
 
 # =============================================================================
@@ -497,7 +503,7 @@ def main():
 
     input_path = sys.argv[1]
     if not os.path.isfile(input_path):
-        print(f"❌ File not found: {input_path}")
+        print(f"[ERROR] File not found: {input_path}")
         sys.exit(1)
 
     output_path = sys.argv[2] if len(sys.argv) >= 3 else \
@@ -510,16 +516,16 @@ def main():
         if len(sys.argv) >= 5:
             end_year   = int(sys.argv[4])
     except ValueError:
-        print("❌ start_year and end_year must be integers.")
+        print("[ERROR] start_year and end_year must be integers.")
         sys.exit(1)
 
     if start_year and end_year and start_year > end_year:
-        print(f"❌ start_year ({start_year}) must be ≤ end_year ({end_year}).")
+        print(f"[ERROR] start_year ({start_year}) must be <= end_year ({end_year}).")
         sys.exit(1)
 
     year_msg = ""
     if start_year and end_year:
-        year_msg = f" (years {start_year}–{end_year})"
+        year_msg = f" (years {start_year}-{end_year})"
     elif start_year:
         year_msg = f" (from {start_year})"
     elif end_year:

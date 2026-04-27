@@ -1,17 +1,39 @@
 # -*- coding: utf-8 -*-
 """
 ships_csv_stats.py
-------------------
+==================
 Reads a SHIPS CSV file produced by ships_to_csv.py and prints a structured
 statistical summary to the terminal, then writes the same summary to a
-companion .txt report file.
+companion text report file.
 
-Usage
+USAGE
 -----
     python ships_csv_stats.py <ships_csv_file> [output_report_file]
 
-If output_report_file is omitted, the report is written alongside the CSV
-with the same base name and a _stats.txt extension.
+    If output_report_file is omitted, the report is written to the same
+    directory as the CSV with the same base name and a _stats.txt extension.
+
+OUTPUT
+------
+The report contains five sections:
+
+    1. File Overview      -- total cycle count, year range, and unique storm count.
+    2. Storms and Cycles per Year -- per-year breakdown of storm and cycle counts.
+    3. Storm Type Distribution -- counts and percentages by NHC storm type code.
+    4. Unique Storm Identifiers -- NHC-style ID, cycle count, and year(s) for
+                                  every storm in the file.
+    5. Predictor Coverage at t=0 -- valid-value count, coverage percentage, and
+                                   min/mean/max for each environmental predictor.
+
+DEPENDENCIES
+------------
+    Python standard library only (csv, collections, pathlib).
+
+DATASET REFERENCE
+-----------------
+For a full description of the HRDOBS AI-Ready dataset structure, variable
+definitions, and quality-control procedures, refer to the accompanying
+manuscript and dataset documentation.
 """
 
 import sys
@@ -178,7 +200,7 @@ def _hdr(title):
     return ['', '=' * W, title, '=' * W]
 
 def _sub(title):
-    return ['', f'── {title} ' + '─' * max(0, W - len(title) - 4)]
+    return ['', f'-- {title} ' + '-' * max(0, W - len(title) - 4)]
 
 def _fmt(v, dec=1):
     if v is None:
@@ -200,7 +222,7 @@ def format_report(stats, csv_path):
     pstats    = stats['predictor_stats']
     pred_cols = stats['pred_cols']
 
-    # ── 1. File Overview ─────────────────────────────────────────────────────
+    # -- 1. File Overview -----------------------------------------------------
     ext(_hdr('SHIPS CSV Statistics Report'))
     add(f'  Source file     : {csv_path}')
     add('')
@@ -211,7 +233,7 @@ def format_report(stats, csv_path):
     add(f'  Years present   : {", ".join(str(y) for y in years)}')
     add(f'  Unique storms   : {len(storms):,}  (by ATCF ID, e.g. AL092014)')
 
-    # ── 2. Storms and Cycles per Year ────────────────────────────────────────
+    # -- 2. Storms and Cycles per Year ----------------------------------------
     ext(_sub('2. Storms and Cycles per Year'))
     add(f'  {"Year":<6}  {"Storms":>8}  {"Cycles":>8}')
     add(f'  {"----":<6}  {"------":>8}  {"------":>8}')
@@ -221,7 +243,7 @@ def format_report(stats, csv_path):
         add(f'  {yr:<6}  {n_s:>8,}  {n_c:>8,}')
     add(f'  {"TOTAL":<6}  {len(storms):>8,}  {total:>8,}')
 
-    # ── 3. Storm Type Distribution ───────────────────────────────────────────
+    # -- 3. Storm Type Distribution -------------------------------------------
     ext(_sub('3. Storm Type Distribution'))
     add(f'  {"Type":<10}  {"Cycles":>8}  {"Pct":>7}  Description')
     add(f'  {"----":<10}  {"------":>8}  {"---":>7}  -----------')
@@ -231,7 +253,7 @@ def format_report(stats, csv_path):
         pct   = 100.0 * count / total if total > 0 else 0.0
         add(f'  {t_key:<10}  {count:>8,}  {pct:>6.1f}%  {label}')
 
-    # ── 4. Unique Storm Identifiers ──────────────────────────────────────────
+    # -- 4. Unique Storm Identifiers ------------------------------------------
     ext(_sub('4. Unique Storm Identifiers'))
     add('  NHC-style format: <number><basin_suffix>, e.g. 09L = 9th Atlantic storm.')
     add('  The same NHC number in different years is a different storm.')
@@ -252,7 +274,7 @@ def format_report(stats, csv_path):
         yr_str = ', '.join(str(y) for y in sorted(d['years']))
         add(f'  {nhc:<7}  {n_cyc:>7,}  {yr_str}')
 
-    # ── 5. Predictor Coverage ────────────────────────────────────────────────
+    # -- 5. Predictor Coverage ------------------------------------------------
     ext(_sub('5. Predictor Coverage at t=0'))
     add(
         f'  {"Column":<22}  {"Valid":>6}  {"Total":>6}  {"Pct":>6}  '
