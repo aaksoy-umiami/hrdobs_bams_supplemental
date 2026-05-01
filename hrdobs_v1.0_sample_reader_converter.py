@@ -1,7 +1,62 @@
+# =============================================================================
+# hrdobs_v1.0_sample_reader_converter.py
+# HRDOBS v1.0 — AI-Ready Dataset Sample Reader and Converter
+#
+# Lightweight companion tool for inspecting and exporting the contents of
+# HRDOBS v1.0 AI-ready HDF5 files.  Requires only h5py and numpy; no
+# knowledge of the HDF5 file format is needed.  See the module docstring
+# below for full usage instructions and CSV output format details.
+#
+# COMPATIBILITY
+#   Designed to read files produced by hrdobs_v1.0_make_ai_ready_batch.py.
+#   The group list (EXPECTED_GROUPS), CF time epoch, obs_count attribute
+#   convention, and all metadata field names match that script exactly.
+#
+# OUTPUT MODES
+#   Mode 1  Expanded listing      — full detail, one file at a time
+#   Mode 2  Compact listing       — condensed table, one file at a time
+#   Mode 3  Tabled batch overview — side-by-side comparison across files
+#   Mode 4  Single CSV export     — all selected files to one CSV
+#   Mode 5  Individual CSV export — one CSV per selected file
+#
+# SUBROUTINE SUMMARY
+# ------------------
+# Helpers
+#   decode_attr              Decode any HDF5 attribute to a plain Python type
+#   format_num               Format a numeric value as a string with optional rounding
+#   extract_vector           Extract two numeric components from an HDF5 attribute
+#   cf_seconds_to_iso        Convert CF seconds-since-1900 to an ISO-8601 string
+#   _is_cf_time_dataset      Return True if a dataset uses CF time encoding
+#   _decode_string_list      Decode an HDF5 string-list attribute for display
+#
+# Data extraction
+#   extract_metadata         Extract targeted global metadata from an HDF5 file
+#   extract_ships            Extract SHIPS environmental parameters from ships_params
+#   extract_groups           Inventory all observation groups in an HDF5 file
+#
+# CSV export
+#   _write_hdf5_to_csv_writer  Write one HDF5 file's complete contents to a CSV writer
+#   process_files_to_single_csv       Export all selected files to one CSV (Mode 4)
+#   process_files_to_individual_csvs  Export each selected file to its own CSV (Mode 5)
+#
+# Display routines
+#   process_file_individual  Print metadata and group inventory for one file (Modes 1-2)
+#   process_files_tabled     Aggregate and display side-by-side comparison tables (Mode 3)
+#
+# Entry point
+#   main                     Interactive file selector and output format dispatcher
+#
+# AUTHORS
+#   Kathryn Sellwood, Altug Aksoy, Brittany Dahl
+#   NOAA / AOML / HRD
+#
+# DATASET VERSION
+#   HRDOBS v1.0
+# =============================================================================
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-hrdobs_sample_reader_converter.py
+hrdobs_v1.0_sample_reader_converter.py
 ==================================
 Supplementary reader and converter for the HRDOBS AI-Ready HDF5 dataset (v1.0).
 
@@ -85,9 +140,10 @@ KNOWN_COORDS = {
     'height', 'altitude',     # vertical coordinates
     'elev',                   # TDR elevation angle
     'az',                     # TDR azimuth angle
-    'p', 'pres', 'pressure',  # pressure levels
+    'p',                      # pressure coordinate
+    'pres',                   # track spline flight-level pressure (track product)
     'ght',                    # geopotential height
-    'rmw',                    # radius of maximum wind
+    'rmw',                    # radius of maximum wind (track product)
     'rr',                     # SFMR rain rate
 }
 
@@ -108,6 +164,7 @@ EXPECTED_GROUPS = [
 # Ordered sequence of metadata fields shown in all display and export modes.
 META_ORDER = [
     'version_number',
+    'storm_name',
     'storm_id',
     'storm_datetime_year', 'storm_datetime_month',
     'storm_datetime_day',  'storm_datetime_hour',
@@ -283,7 +340,10 @@ def extract_metadata(attrs):
                   'storm_datetime_day',  'storm_datetime_hour'):
             m[k] = "N/A"
 
-    # Storm identifier
+    # Storm name and identifier
+    sname = decode_attr(attrs.get('storm_name', ''))
+    m['storm_name'] = str(sname) if sname not in ('', None) else "N/A"
+
     sid = decode_attr(attrs.get('storm_id', ''))
     m['storm_id'] = str(sid) if sid not in ('', None) else "N/A"
 
