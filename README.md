@@ -1,4 +1,4 @@
-# HRDOBS BAMS Manuscript (Aksoy et al. 2026) Supplemental Material
+# HRDOBS v1.0 BAMS Manuscript (Aksoy et al. 2026) Supplemental Material
 
 This repository contains supplemental material for our BAMS manuscript titled "HRDOBS: A Comprehensive, AI-Ready Dataset for Standardized Observations Collected in and Around North Atlantic Tropical Cyclones." It includes:
 
@@ -7,3 +7,5 @@ This repository contains supplemental material for our BAMS manuscript titled "H
    - Python scripts that generated the manuscript figures,
    - Other Python scripts for reading/converting data files, and
    - HURDAT2 data files.
+
+Please note that when appropriate, all scripts are designed for the official dataset release v1.0.
