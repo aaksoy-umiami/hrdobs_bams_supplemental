@@ -1,3 +1,112 @@
+# =============================================================================
+# hrdobs_v1.0_make_ai_ready_batch.py
+# HRDOBS v1.0 — AI-Ready Dataset Conversion Script
+#
+# Converts original HRDOBS HDF5 files into a standardized "AI-ready" format
+# suitable for use in data assimilation, machine learning, and research
+# applications.  Each output file has a flat group structure, standardized
+# units, observation error estimates, CF-compliant time encoding, and a
+# companion Kerchunk JSON sidecar for virtual (lazy) access.
+#
+# USAGE
+# -----
+# Run interactively and select one of seven operating modes at the prompt:
+#
+#   Mode 1 — Identify Double Entries
+#             Scan input files for NHC codes that map to multiple storm names
+#             within the same year and report the conflicts.
+#
+#   Mode 2 — Rename Double-Entry Files
+#             Preview a rename plan that resolves double-entry conflicts to a
+#             single canonical name, then optionally execute it.
+#
+#   Mode 3 — Check Temporal Gaps
+#             For every storm in the input directory, build a unified
+#             deduplicated 6-hourly cycle timeline and report any gaps.
+#
+#   Mode 4 — Spline Track Altitude Diagnostic
+#             Determine the flight-level pressure altitude for each spline
+#             track from raw .fix files.  Produces a diagnostic CSV used by
+#             Mode 6 to inject the correct pressure into the output files.
+#
+#   Mode 5 — QC Scan (Dry Run)
+#             Run the full quality-control pipeline on all input files without
+#             writing any output.  Reports how many files would be skipped and
+#             the expected error-assignment actions.
+#
+#   Mode 6 — Full Processing
+#             Main conversion pipeline.  For each input file: applies QC,
+#             flattens the group hierarchy, standardizes units, assigns
+#             observation errors, converts time to CF convention, writes the
+#             AI-ready HDF5 file and its Kerchunk JSON sidecar, then produces
+#             a dataset inventory CSV and schema reference CSV.
+#
+#   Mode 7 — Rebuild DB and Schema Only
+#             Re-reads existing AI-ready files to regenerate the inventory CSV
+#             and schema reference CSV without re-converting any source data.
+#
+# KEY CONFIGURATION (top of script)
+# ----------------------------------
+#   INPUT_DIR          — directory containing original HRDOBS HDF5 files
+#   OUTPUT_DIR         — root directory for AI-ready output files
+#   INFO_DIR           — auxiliary information directory
+#   BASIN_FILTER       — 'ATL', 'EPAC', or 'ALL'
+#   SHIPS_CSV_PATH     — path to SHIPS predictor CSV (from ships_to_csv.py)
+#   BANNED_INSTRUMENTS — instrument types excluded from output
+#
+# SUBROUTINE SUMMARY
+# ------------------
+# Configuration and metadata helpers
+#   process_root_metadata        Clean and normalize raw HDF5 global attributes
+#   load_ships_lookup            Load SHIPS predictor CSV into a keyed lookup dict
+#   _ships_key_from_hrdobs       Derive the SHIPS lookup key from an HRDOBS filename
+#   detect_basin                 Identify storm basin (ATL / EPAC) from storm_id
+#   should_process_file          Filter files by the configured BASIN_FILTER
+#   extract_filename_metadata    Parse storm metadata encoded in the filename
+#
+# Fix-file and spline track helpers
+#   find_fix_file                Locate the raw .fix file for a given storm
+#   parse_fix_file               Parse a .fix file into a list of fix records
+#   compute_spline_altitude      Compute mean flight-level altitude from fix records
+#   extract_flight_level_pressure  Extract flight-level pressure from source HDF5
+#
+# Data utilities
+#   decode_attr                  Decode any HDF5 attribute value to a plain Python type
+#   safe_attr                    Convert values to h5py-compatible strings or scalars
+#   extract_error_val            Extract a leading numeric value from an error attribute
+#   replace_missing_values       Replace sentinel/fill values with NaN
+#   convert_packed_time_to_cf    Convert YYYYMMDDHHMMSS floats to CF seconds since epoch
+#   generate_virtual_manifest    Generate a Kerchunk JSON sidecar for an HDF5 file
+#
+# Quality control
+#   resolve_tc_category          Resolve raw NHC tc_category to a standardized token
+#   _apply_time_qc               Apply calendar-parse and file-window time QC in-place
+#   _check_time_span             Advisory check for suspiciously short time spans
+#   validate_and_clean_data      Full QC pipeline: bounds, anchor, all-NaN, location
+#
+# Core conversion
+#   convert_universal            Convert one source HDF5 file to AI-ready format
+#   extract_inventory_and_schema Re-read an AI-ready file to rebuild inventory/schema
+#   save_schema                  Write the dataset schema reference CSV
+#
+# Pre-conversion diagnostics
+#   identify_double_entries      Report NHC codes with multiple storm names (Mode 1)
+#   canonical_name               Select canonical name from competing storm IDs
+#   check_temporal_gaps          Report missing 6-hourly cycles per storm (Mode 3)
+#   rename_double_entries        Preview / execute storm-name normalization (Mode 2)
+#   check_spline_track_altitudes Produce the spline altitude diagnostic (Mode 4)
+#
+# Entry point
+#   main                         Interactive mode selector and top-level dispatcher
+#
+# AUTHORS
+#   Kathryn Sellwood, Altug Aksoy, Brittany Dahl
+#   NOAA / AOML / HRD
+#
+# DATASET VERSION
+#   HRDOBS v1.0
+# =============================================================================
+
 import os
 import glob
 import h5py
@@ -16,10 +125,30 @@ warnings.filterwarnings('ignore')
 # =============================================================================
 # CONFIGURATION
 # =============================================================================
+# All directory paths and output filenames are defined here.  Change these
+# to relocate inputs, outputs, or reports without touching any other code.
 
-INPUT_DIR  = "HRDOBS_hdf5"
-INFO_DIR   = "HRDOBS_info"
-OUTPUT_DIR = "AI_ready_dataset"
+# --- Input / output directories ---
+INPUT_DIR  = "HRDOBS_hdf5"              # Original HRDOBS HDF5 source files
+INFO_DIR   = "HRDOBS_info"              # Auxiliary information directory
+OUTPUT_DIR = "AI_ready_dataset"         # Root directory for AI-ready output
+FIXES_DIR  = "fixes_for_spline_tracks"  # Raw .fix files for spline track altitudes
+
+# --- Input files ---
+SHIPS_CSV_PATH = "ships_converted_for_hrdobs.csv"  # SHIPS predictor CSV (from ships_to_csv.py)
+
+# --- Output report filenames ---
+SPLINE_ALT_REPORT      = "spline_track_altitude_report.csv"
+SPLINE_GAP_DIAGNOSTICS = "spline_track_gap_diagnostics.txt"
+QC_FORENSICS_REPORT    = "qc_forensics_report.csv"
+ERROR_SIM_REPORT       = "error_assignment_simulation.csv"
+SHIPS_MISMATCH_REPORT  = "ships_metadata_mismatches.csv"
+SHIPS_NOMATCH_REPORT   = "ships_no_match_cycles.csv"
+INVENTORY_DB           = "hrdobs_inventory_db.csv"
+SCHEMA_REPORT          = "hrdobs_dataset_schema.csv"
+DOUBLE_ENTRIES_REPORT  = "hrdobs_double_entries.txt"
+TEMPORAL_GAPS_REPORT   = "hrdobs_temporal_gaps.txt"
+RENAME_PLAN_REPORT     = "hrdobs_rename_plan.txt"
 
 BANNED_INSTRUMENTS = ['lidar', 'dwl', 'coyote']
 
@@ -43,7 +172,7 @@ CRITICAL_METADATA = {
     'center_from_tc_vitals', 'radius_of_maximum_wind_km',
 }
 
-# --- NEW CONSTANT: Exhaustive list of possible groups based on schema ---
+# Exhaustive list of possible observation groups based on the dataset schema.
 EXPECTED_GROUPS_LIST = [
     'dropsonde_ghawk', 'dropsonde_noaa42', 'dropsonde_noaa43', 'dropsonde_noaa49', 'dropsonde_usaf',
     'flight_level_hdobs_noaa42', 'flight_level_hdobs_noaa43', 'flight_level_hdobs_noaa49', 'flight_level_hdobs_usaf',
@@ -52,7 +181,6 @@ EXPECTED_GROUPS_LIST = [
     'track_best_track', 'track_spline_track', 'track_vortex_message'
 ]
 
-# --- V10 UPDATE: Replaced 'platforms' with 'existing_groups' and 'expected_groups' ---
 EXPECTED_METADATA = {
     'creator_email', 'creator_name',
     'geospatial_lat_max', 'geospatial_lat_min',
@@ -73,7 +201,7 @@ SENTINEL_VALUES = {-99.0, -999.0, 9999.0, 999.0, 99.0}
 CORE_ANCHOR_VARS = {'lat', 'latitude', 'lon', 'longitude', 'time'}
 
 # Variables that are coordinate/geometric fields — never assigned an error field.
-# Mirrors COORD_VARS in validate_ai_ready.py; keep both in sync.
+# Mirrors COORD_VARS in hrdobs_v1.0_validate_ai_ready_batch.py; keep both in sync.
 COORD_VARS = {
     'time', 'lat', 'latitude', 'lon', 'longitude',
     'ght',          # geopotential height  (vertical coordinate)
@@ -100,7 +228,7 @@ ERROR_FALLBACK_RULES = {
 }
 
 # =============================================================================
-# V11: OBSERVATION ERROR CONFIGURATION
+# OBSERVATION ERROR CONFIGURATION
 # =============================================================================
 OBS_ERROR_CONFIG = {
     # 1. Standard Flight Level
@@ -208,7 +336,7 @@ VALID_BOUNDS = {
     'lon':       (-180.0,  180.0),
     'longitude': (-180.0,  180.0),   
     'time':      (19900000000000.0, 20300000000000.0),  # YYYYMMDDHHMMSS
-    'sfcp':      (80000.0, 110000.0),                   # Pa  (was hPa — fixed)
+    'sfcp':      (80000.0, 110000.0),                   # Pa
     'height':    (0.0, 20000.0),
     'altitude':  (0.0, 20000.0),
     'ght':       (0.0, 20000.0),
@@ -239,7 +367,6 @@ OBS_PROXIMITY_DEG = 10.0
 
 # Metadata attributes that are ALWAYS computed by the conversion — never
 # passed through from the source file, even if they exist there.
-# --- V10 UPDATE: Replaced 'platforms' with 'existing_groups' and 'expected_groups' ---
 CONTROLLED_ATTRS = {
     'creator_email', 'creator_name', 'title', 'version_number',
     'existing_groups', 'expected_groups',
@@ -279,7 +406,7 @@ SPLINE_ALT_REPORT = "spline_track_altitude_report.csv"
 FL_EXCLUDED_AIRCRAFT = {'giv', 'g-iv', 'g_iv', 'noaa49', 'noaa_giv'}
 
 # =============================================================================
-# SHIPS PREDICTOR CSV (v9)
+# SHIPS PREDICTOR CSV
 # =============================================================================
 # Path to the SHIPS CSV file produced by ships_to_csv.py.
 SHIPS_CSV_PATH = "ships_converted_for_hrdobs.csv"
@@ -329,14 +456,13 @@ SHIPS_PREDICTOR_META = {
 def process_root_metadata(source_attrs):
     """
     Takes a dictionary of raw attributes and returns a cleaned dictionary 
-    with native numerical types and split arrays for the v10 AI-ready dataset.
+    with native numerical types and split arrays for the AI-ready dataset.
     """
     cleaned = {}
 
-    # --- FIX: Guarantee these fields always exist ---
+    # Guarantee these fields always exist even if storm_motion is absent.
     cleaned['storm_motion_speed_kt'] = np.nan
     cleaned['storm_motion_heading_deg'] = np.nan
-    # ------------------------------------------------
     
     # Define keys that require a direct cast to float
     float_keys = [
@@ -769,7 +895,7 @@ def extract_flight_level_pressure(f_in):
 
 def resolve_tc_category(raw_cat, intensity_ms):
     """
-    Resolve a raw NHC tc_category string to a standardised category token.
+    Resolve a raw NHC tc_category string to a standardized category token.
 
     Resolution rules (applied in order):
       1. Passthrough categories (TD, TS, SS, SD, EX, LO, DB, WV) → returned as-is.
@@ -787,7 +913,7 @@ def resolve_tc_category(raw_cat, intensity_ms):
 
     Returns
     -------
-    resolved : str  — standardised category token
+    resolved : str  — standardized category token
     source   : str  — 'source' | 'derived' | 'unknown' (for QC logging)
     """
     def _intensity_to_cat(v_ms):
@@ -801,14 +927,14 @@ def resolve_tc_category(raw_cat, intensity_ms):
         if v_kt >= 34:  return 'TS'
         return 'TD'
 
-    # Normalise intensity
+    # Normalize intensity
     try:
         v_ms = float(intensity_ms)
         has_intensity = not np.isnan(v_ms)
     except (TypeError, ValueError):
         has_intensity = False
 
-    # Normalise category
+    # Normalize category
     cat = str(raw_cat).strip().upper() if raw_cat not in (None, 'NaN', '', 'nan') else None
 
     if cat in NHC_PASSTHROUGH_CATS:
@@ -819,7 +945,7 @@ def resolve_tc_category(raw_cat, intensity_ms):
             return _intensity_to_cat(v_ms), 'derived'
         return 'HU', 'source'   # tier unknown — no intensity available
 
-    # Category absent or unrecognised — try to derive from intensity
+    # Category absent or unrecognized — try to derive from intensity
     if has_intensity:
         return _intensity_to_cat(v_ms), 'derived'
 
@@ -918,7 +1044,6 @@ def extract_filename_metadata(filepath):
     filename = os.path.basename(filepath)
     meta = {}
     
-    # Updated Regex to safely capture the 5th group (minutes)
     match = re.search(r'HRDOBS_(.*?)[\._](\d{4})(\d{2})(\d{2})(\d{2})(\d{2})?', filename)
     if match:
         storm_id   = match.group(1)
@@ -959,7 +1084,6 @@ def convert_packed_time_to_cf(packed_time_array):
     
     epoch = pd.Timestamp('1900-01-01 00:00:00Z', tz='UTC')
     
-    # FIX: Remove .dt from the subtraction result
     seconds_since = (dt_objects - epoch).total_seconds()
     
     cf_time_array[valid_mask] = seconds_since
@@ -1058,7 +1182,6 @@ def _apply_time_qc(df_clean, ac, group_name, cycle_dt, window_hours, logs):
     raw_vals = df_clean.loc[notna_mask, ac]
 
     # Vectorised parse — invalid calendar dates produce NaT
-    # FIX: Added utc=True to avoid timezone subtraction errors
     parsed = pd.to_datetime(
         raw_vals.astype(int).astype(str).str.zfill(14),
         format='%Y%m%d%H%M%S',
@@ -1206,9 +1329,9 @@ def validate_and_clean_data(df, group_name, cycle_dt=None):
     anchor_mask = pd.Series(True, index=df_clean.index)
     for ac in anchor_cols:
         # Also enforce bounds on anchor columns.
-        # v8: VALID_BOUNDS now includes both short-form ('lat', 'lon') and
-        # long-form ('latitude', 'longitude') keys, so this check correctly
-        # fires regardless of how the source file names its coordinate columns.
+        # VALID_BOUNDS includes both short-form ('lat', 'lon') and
+        # long-form ('latitude', 'longitude') keys so this check fires
+        # regardless of how the source file names its coordinate columns.
         ac_l = cols_lower[ac]
         if ac_l in VALID_BOUNDS:
             lo, hi = VALID_BOUNDS[ac_l]
@@ -1254,7 +1377,7 @@ def validate_and_clean_data(df, group_name, cycle_dt=None):
     # (Step 2 already deletes rows with NaN anchors), so this fires only for
     # vertical coordinates that were fully wiped out by bounds QC in Step 1
     # while horizontal position and time remained valid.
-    # Must stay in sync with LOCATION_VARS in validate_ai_ready_v8.py.
+    # Must stay in sync with LOCATION_VARS in hrdobs_v1.0_validate_ai_ready_batch.py.
     _LOCATION_VARS = {'lat', 'latitude', 'lon', 'longitude', 'height', 'altitude', 'ght'}
     for col, col_l in cols_lower.items():
         if col_l not in _LOCATION_VARS:
@@ -1473,7 +1596,7 @@ def convert_universal(input_h5, output_h5, scan_only=False, spline_alt_mb=None,
             set_meta('radius_of_maximum_wind_km', rmw_val)
 
             # ----------------------------------------------------------------
-            # Resolve tc_category to a standardised token.
+            # Resolve tc_category to a standardized token.
             # ----------------------------------------------------------------
             raw_cat_val = "NaN"
             if 'storm stats' in f_in:
@@ -1584,9 +1707,7 @@ def convert_universal(input_h5, output_h5, scan_only=False, spline_alt_mb=None,
                     log['Filename'] = os.path.basename(input_h5)
                     qc_logs.append(log)
 
-                # ---------------------------------------------------------
-                # v8: Storm-center proximity filter
-                # ---------------------------------------------------------
+                # Storm-center proximity filter
                 if clat_val is not None and clon_val is not None and len(df_clean) > 0:
                     cl = {c.lower(): c for c in df_clean.columns}
                     lat_col = next((cl[k] for k in ['lat', 'latitude'] if k in cl), None)
@@ -1628,7 +1749,7 @@ def convert_universal(input_h5, output_h5, scan_only=False, spline_alt_mb=None,
                     })
                     return
 
-                # --- V11: NEW ERROR ASSIGNMENT LOGIC (Phase 2 & 3) ---
+                # Assign observation errors per OBS_ERROR_CONFIG rules.
                 rules = OBS_ERROR_CONFIG.get(group_name, {})
                 assigned_errors = set()
                 
@@ -1738,7 +1859,6 @@ def convert_universal(input_h5, output_h5, scan_only=False, spline_alt_mb=None,
                     for col in df_clean.columns:
                         data_arr = df_clean[col].values.astype(np.float64)
                         
-                        # --- V10 TIME CONVERSION ---
                         if col == 'time':
                             data_arr = convert_packed_time_to_cf(data_arr)
 
@@ -1767,7 +1887,6 @@ def convert_universal(input_h5, output_h5, scan_only=False, spline_alt_mb=None,
                                     sub_grp[base_var].attrs['units']
                                 )
                                 
-                        # --- V10 CF-TIME ATTRIBUTES ---
                         if col == 'time':
                             dset_out.attrs['units'] = 'seconds since 1900-01-01 00:00:00Z'
                             dset_out.attrs['calendar'] = 'gregorian'
@@ -1855,8 +1974,7 @@ def convert_universal(input_h5, output_h5, scan_only=False, spline_alt_mb=None,
                         })
                         continue
 
-                    # If clon/lon is positive, flip sign (temporary patch —
-                    # root cause is inconsistent sign convention in source files).
+                    # Flip positive longitudes to negative (West convention).
                     for lon_col in [c for c in df.columns if c.lower() in ('lon', 'clon')]:
                         df[lon_col] = df[lon_col].apply(
                             lambda x: -x if (pd.notna(x) and x > 0) else x
@@ -1953,7 +2071,6 @@ def convert_universal(input_h5, output_h5, scan_only=False, spline_alt_mb=None,
                             if np.all(np.isnan(data_arr)):
                                 continue
                                 
-                            # --- V10 TIME CONVERSION ---
                             if col == 'time':
                                 data_arr = convert_packed_time_to_cf(data_arr)
 
@@ -1966,7 +2083,6 @@ def convert_universal(input_h5, output_h5, scan_only=False, spline_alt_mb=None,
                                 for ak, av in sub_grp[col].attrs.items():
                                     dset_out.attrs[ak] = safe_attr(av)
                                     
-                            # --- V10 CF-TIME ATTRIBUTES ---
                             if col == 'time':
                                 dset_out.attrs['units'] = 'seconds since 1900-01-01 00:00:00Z'
                                 dset_out.attrs['calendar'] = 'gregorian'
@@ -2002,9 +2118,7 @@ def convert_universal(input_h5, output_h5, scan_only=False, spline_alt_mb=None,
             global_attrs['existing_groups'] = sorted(obs_groups)
             global_attrs['expected_groups'] = EXPECTED_GROUPS_LIST
 
-            # --- FIX: Write the sidecar link directly to the HDF5 file ---
             global_attrs['Virtual_Manifest'] = os.path.basename(output_h5).replace('.hdf5', '.json') if output_h5 else 'NaN'
-            # -------------------------------------------------------------
 
             # ── Storm motion (from source, or NaN) ────────────────
             global_attrs['storm_motion'] = source_storm_motion
@@ -2079,7 +2193,7 @@ def convert_universal(input_h5, output_h5, scan_only=False, spline_alt_mb=None,
             global_attrs['geospatial_lat_units'] = 'degrees north'
             global_attrs['geospatial_lon_units'] = 'degrees east'
 
-            # ── V10: CLEAN AND WRITE ALL METADATA ─────────────────
+            # ── Write all global metadata ──────────────────────────
             cleaned_attrs = process_root_metadata(global_attrs)
             for k, v in cleaned_attrs.items():
                 if not scan_only:
@@ -2088,7 +2202,7 @@ def convert_universal(input_h5, output_h5, scan_only=False, spline_alt_mb=None,
 
 
             # ----------------------------------------------------------------
-            # 4c. SHIPS parameters group (v9)
+            # 4c. SHIPS parameters group
             # ----------------------------------------------------------------
             if ships_lookup:
                 _file_meta  = extract_filename_metadata(input_h5)
@@ -2255,7 +2369,7 @@ def convert_universal(input_h5, output_h5, scan_only=False, spline_alt_mb=None,
 
                 inventory_entry = {
                     "Filename":              os.path.basename(output_h5),
-                    "Virtual_Manifest":      np.nan,  # <-- NEW: Tracks the JSON sidecar
+                    "Virtual_Manifest":      np.nan,
                     "Storm":                 meta.get('storm_name', ''),
                     "Storm_ID":              meta.get('storm_id', ''),
                     "Storm_Datetime":        meta.get('storm_datetime', ''),
@@ -2295,9 +2409,8 @@ def convert_universal(input_h5, output_h5, scan_only=False, spline_alt_mb=None,
             })
             inventory_entry = None
 
-        # --- V10 FIX: ABORT IF NO OBSERVATION GROUPS EXIST ---
-        # Instead of relying on Python variables, we physically check the 
-        # actual file on disk to see what groups survived the QC process.
+        # Abort if no observation groups survived: physically inspect the
+        # output file rather than relying on in-memory tracking variables.
         if not scan_only and os.path.isfile(output_h5):
             valid_obs_survived = False
             try:
@@ -2321,9 +2434,7 @@ def convert_universal(input_h5, output_h5, scan_only=False, spline_alt_mb=None,
                     os.remove(output_h5)
                 except OSError:
                     pass
-                # Return None so it is completely scrubbed from the inventory tracking
                 return None, schema_updates, qc_logs, ships_mismatches, ships_no_matches
-        # -----------------------------------------------------
 
         # ── Post-write check: validate metadata completeness ──────────
         if not scan_only and output_h5 and inventory_entry is not None \
@@ -2389,13 +2500,10 @@ def convert_universal(input_h5, output_h5, scan_only=False, spline_alt_mb=None,
                         'Total_Obs_Valid': 0, 'Total_Obs_Artifact': 0,
                     })
 
-        # --- V10 UPDATE: GENERATE VIRTUAL DATASET SIDECAR ---
         if not scan_only and inventory_entry is not None and os.path.isfile(output_h5):
             manifest_file = generate_virtual_manifest(output_h5)
             if manifest_file:
-                # Update the inventory database to indicate a twin was generated
                 inventory_entry['Virtual_Manifest'] = os.path.basename(manifest_file)
-        # ----------------------------------------------------
 
     except Exception as e:
         print(f"  ❌ Failed {input_h5}: {e}")
@@ -2503,7 +2611,7 @@ def save_schema(schema_master):
         for d in sorted(contents['datasets']):
             rows.append({"Item_Type": f"Dataset Variable ({grp})", "Name": d})
 
-    pd.DataFrame(rows).to_csv("hrdobs_dataset_schema.csv", index=False)
+    pd.DataFrame(rows).to_csv(SCHEMA_REPORT, index=False)
     print("✅ Schema written to hrdobs_dataset_schema.csv")
 
 
@@ -2518,7 +2626,7 @@ def identify_double_entries(input_dir):
     same calendar year (e.g. 'TWO02L' vs 'BONNIE02L').
     """
 
-    OUT_FILE = "hrdobs_double_entries.txt"
+    OUT_FILE = DOUBLE_ENTRIES_REPORT
 
     def emit(line="", file=None):
         print(line)
@@ -2727,7 +2835,7 @@ def check_temporal_gaps(input_dir):
     6-hourly cycle files and report any gaps between first and last cycle.
     """
 
-    OUT_FILE = "hrdobs_temporal_gaps.txt"
+    OUT_FILE = TEMPORAL_GAPS_REPORT
     GAP_HOURS = 6
 
     input_files = glob.glob(os.path.join(input_dir, "**", "*.hdf5"), recursive=True)
@@ -2903,7 +3011,7 @@ def rename_double_entries(input_dir):
     No files are modified until the user confirms.
     """
 
-    OUT_FILE = "hrdobs_rename_plan.txt"
+    OUT_FILE = RENAME_PLAN_REPORT
 
     input_files = glob.glob(os.path.join(input_dir, "**", "*.hdf5"), recursive=True)
     if not input_files:
@@ -3423,7 +3531,7 @@ def check_spline_track_altitudes(input_dir):
     print("=" * 68)
     print(f"\n✅ Full report → {OUT_FILE}")
 
-    DIAG_FILE = "spline_track_gap_diagnostics.txt"
+    DIAG_FILE = SPLINE_GAP_DIAGNOSTICS
 
     resolved = df_report[df_report['Status'].isin(['OK', 'MIXED_ALTITUDES'])].copy()
     resolved['alt'] = pd.to_numeric(resolved['Mean_Altitude_mb'], errors='coerce')
@@ -3605,10 +3713,10 @@ def main():
         all_qc_logs = []
         all_ships_mismatches = []
         all_ships_no_matches  = []
-        error_sim_logs = []     # NEW: Track error assignments
-        skipped_files = []      
-        simulated_written = 0   
-        skip_reason_counts = {} 
+        error_sim_logs = []
+        skipped_files = []
+        simulated_written = 0
+        skip_reason_counts = {}
         
         for i, input_path in enumerate(input_files):
             filename = os.path.basename(input_path)
@@ -3639,18 +3747,16 @@ def main():
                 print(f"  Scanned {i+1}/{len(input_files)} files...")
                 
         if all_qc_logs:
-            pd.DataFrame(all_qc_logs).to_csv("qc_forensics_report.csv", index=False)
+            pd.DataFrame(all_qc_logs).to_csv(QC_FORENSICS_REPORT, index=False)
             print("✅ QC Forensics Report → qc_forensics_report.csv")
         else:
             print("✅ No QC issues found.")
 
-        # --- V11: Export Error Assignment Ledger ---
         if error_sim_logs:
-            pd.DataFrame(error_sim_logs).to_csv("error_assignment_simulation.csv", index=False)
+            pd.DataFrame(error_sim_logs).to_csv(ERROR_SIM_REPORT, index=False)
             print(f"✅ Error Assignment Simulation → error_assignment_simulation.csv ({len(error_sim_logs)} actions logged)")
-        # -------------------------------------------
 
-        _mismatch_csv = "ships_metadata_mismatches.csv"
+        _mismatch_csv = SHIPS_MISMATCH_REPORT
         if all_ships_mismatches:
             pd.DataFrame(all_ships_mismatches).to_csv(_mismatch_csv, index=False)
             print(f"⚠️  SHIPS metadata mismatches → {_mismatch_csv} "
@@ -3659,7 +3765,7 @@ def main():
         else:
             print(f"✅ No SHIPS/HRDOBS metadata mismatches — {_mismatch_csv} not written.")
 
-        _nomatch_csv = "ships_no_match_cycles.csv"
+        _nomatch_csv = SHIPS_NOMATCH_REPORT
         if all_ships_no_matches:
             pd.DataFrame(all_ships_no_matches).to_csv(_nomatch_csv, index=False)
             print(f"⚠️  SHIPS no-match cycles → {_nomatch_csv} "
@@ -3757,7 +3863,7 @@ def main():
         print(f"Processing {len(input_files)} {_BASIN_LABEL.get(BASIN_FILTER, BASIN_FILTER)} HDF5 files.")
 
         ships_lookup = load_ships_lookup(SHIPS_CSV_PATH)
-        ships_matched = 0   
+        ships_matched = 0
 
         inventory_list = []
         schema_master  = {'global': set(), 'groups': {}}
@@ -3822,7 +3928,7 @@ def main():
                 print(f"  Processed {i+1}/{len(input_files)} files...")
 
         if all_qc_logs:
-            pd.DataFrame(all_qc_logs).to_csv("qc_forensics_report.csv", index=False)
+            pd.DataFrame(all_qc_logs).to_csv(QC_FORENSICS_REPORT, index=False)
             print("✅ QC Forensics Report → qc_forensics_report.csv")
         else:
             print("✅ No QC issues found.")
@@ -3843,7 +3949,7 @@ def main():
                 print(f"   ⚠️  {n_no_match} file(s) had no matching SHIPS cycle "
                       f"(see qc_forensics_report.csv for details)")
 
-            _mismatch_csv = "ships_metadata_mismatches.csv"
+            _mismatch_csv = SHIPS_MISMATCH_REPORT
             if all_ships_mismatches:
                 pd.DataFrame(all_ships_mismatches).to_csv(_mismatch_csv, index=False)
                 n_files = len(set(r['Filename'] for r in all_ships_mismatches))
@@ -3863,7 +3969,7 @@ def main():
             else:
                 print(f"✅ No SHIPS/HRDOBS metadata mismatches — {_mismatch_csv} not written.")
 
-            _nomatch_csv = "ships_no_match_cycles.csv"
+            _nomatch_csv = SHIPS_NOMATCH_REPORT
             if all_ships_no_matches:
                 pd.DataFrame(all_ships_no_matches).to_csv(_nomatch_csv, index=False)
                 n_nm_storms = len(set(r['Storm_ID'] for r in all_ships_no_matches))
@@ -3874,7 +3980,7 @@ def main():
                 print(f"✅ All HRDOBS cycles matched a SHIPS entry "
                       f"— {_nomatch_csv} not written.")
 
-        pd.DataFrame(inventory_list).to_csv("hrdobs_inventory_db.csv", index=False)
+        pd.DataFrame(inventory_list).to_csv(INVENTORY_DB, index=False)
         print(f"✅ Inventory DB → hrdobs_inventory_db.csv ({len(inventory_list)} files).")
         save_schema(schema_master)
 
@@ -3936,7 +4042,7 @@ def main():
             if (i + 1) % 500 == 0:
                 print(f"   Scanned {i+1}/{len(ai_files)} files...")
 
-        pd.DataFrame(inventory_list).to_csv("hrdobs_inventory_db.csv", index=False)
+        pd.DataFrame(inventory_list).to_csv(INVENTORY_DB, index=False)
         print(f"✅ Inventory DB written ({len(inventory_list)} entries).")
         save_schema(schema_master)
         return
@@ -3944,4 +4050,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    

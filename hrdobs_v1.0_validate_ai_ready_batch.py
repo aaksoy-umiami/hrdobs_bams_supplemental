@@ -1,3 +1,84 @@
+# =============================================================================
+# hrdobs_v1.0_validate_ai_ready_batch.py
+# HRDOBS v1.0 — AI-Ready Dataset Validation Script
+#
+# Validates all AI-ready HDF5 files produced by make_ai_ready.py, checking
+# that every file conforms to the HRDOBS v1.0 schema.  Designed to be run
+# after a full dataset conversion (Mode 6) or after any targeted re-processing.
+# All checks are read-only; no files are modified.
+#
+# USAGE
+# -----
+# Set TARGET_DIR at the bottom of the script (or call run_validation() directly)
+# and run:
+#
+#   python hrdobs_v1.0_validate_ai_ready_batch.py
+#
+# Two output CSV files are written to the working directory:
+#   validation_issues.csv    — one row per issue found (Severity, Filename, Issue)
+#   validation_obs_counts.csv — per-file, per-group observation counts
+#
+# KEY CONFIGURATION (top of script)
+# ----------------------------------
+#   BASIN_FILTER       — 'ATL', 'EPAC', or 'ALL' (must match hrdobs_v1.0_make_ai_ready_batch.py)
+#   SENTINEL_VALUES    — numeric fill values that must not appear in any dataset
+#   VALID_BOUNDS       — physical plausibility bounds per variable name
+#   OBS_PROXIMITY_DEG  — maximum allowed degrees from storm center (±)
+#
+# VALIDATION CHECKS (in order of execution)
+# ------------------------------------------
+#   Check  1a  — Critical global metadata: present, non-NaN, correct type/format
+#   Check  1b  — Expected global metadata: present and non-empty
+#   Check   2  — Root structure: all root items must be HDF5 groups
+#   Check   3  — Banned instruments: no lidar / dwl / coyote group names
+#   Check   4  — obs_count attribute: present, integer, and positive
+#   Check   5  — Dataset flatness: no nested sub-groups within any data group
+#   Check   6  — Entirely-NaN datasets in track groups
+#   Check   7  — Positive longitudes in track groups (must be West-negative)
+#   Check   8  — Dataset length consistency with obs_count
+#   Check   9  — fill_value attribute present on every dataset
+#   Check   9b — Sentinel / fill-value residuals in numeric data
+#   Check   9c — Physical bounds on known variables
+#   Check   9d — CF-compliant time units on all 'time' datasets
+#   Check  9e  — Error field long_name attribute present
+#   Check   9f — NaN parity between base variables and their error fields
+#   Check  10  — Error coverage: every non-coordinate obs variable has an error
+#   Check  11  — Spline track 'pres' dataset: present, units, bounds, constancy
+#   Check  12  — All-NaN data columns in observation groups
+#   Check  13  — Entirely-NaN location columns
+#   Check  14  — tc_category token is a recognized valid value
+#   Check  15  — Byte-string prefix artifacts in global attributes
+#   Check  16  — Dataset dtype consistency (expected float64)
+#   Check  17  — Time monotonicity in track groups
+#   Check  18  — Storm-center proximity: observations within ±OBS_PROXIMITY_DEG
+#   Check  19  — ships_params group: required attributes and predictor datasets
+#   Cross-file — Storm naming convention: no placeholder names when a proper
+#                name exists for the same NHC code in the same year
+#
+# SUBROUTINE SUMMARY
+# ------------------
+#   decode_attr           Decode any HDF5 attribute to a plain Python type
+#   is_track_group        Return True if the group name is a track group
+#   is_ships_group        Return True if the group name is ships_params
+#   is_coord              Return True if a variable name is a coordinate field
+#   is_track_product      Return True if a variable name is a track product field
+#   is_err_field          Return True if a variable name is an error field
+#   detect_basin          Identify storm basin (ATL / EPAC) from storm_id
+#   should_validate_file  Filter files by the configured BASIN_FILTER
+#   is_nan_value          Return True if a value is NaN, empty, or 'nan'
+#   validate_json_sidecar Check that the Kerchunk JSON sidecar exists and is valid
+#   validate_file         Run all per-file checks; return (issues, summary)
+#   run_validation        Top-level runner: scan directory, aggregate results,
+#                         write output CSVs, and print summary statistics
+#
+# AUTHORS
+#   Kathryn Sellwood, Altug Aksoy, Brittany Dahl
+#   NOAA / AOML / HRD
+#
+# DATASET VERSION
+#   HRDOBS v1.0
+# =============================================================================
+
 import os
 import glob
 import re
@@ -8,8 +89,17 @@ import pandas as pd
 import ujson
 
 # =============================================================================
-# CONFIGURATION — must stay in sync with make_ai_ready_batch_v10.py
+# CONFIGURATION — must stay in sync with hrdobs_v1.0_make_ai_ready_batch.py
 # =============================================================================
+# All directory paths and output filenames are defined here.  Change these
+# to relocate the target dataset or reports without touching any other code.
+
+# --- Input directory ---
+TARGET_DIR = "AI_ready_dataset/HRDOBS_hdf5"  # AI-ready HDF5 files to validate
+
+# --- Output report filenames ---
+ISSUES_REPORT = "validation_issues.csv"
+COUNTS_REPORT = "validation_obs_counts.csv"
 
 CRITICAL_METADATA = [
     'storm_name', 'storm_id', 'storm_datetime', 'storm_epoch',
@@ -97,7 +187,7 @@ TRACK_GROUP_PREFIX = 'track_'
 SPLINE_TRACK_GROUP = 'track_spline_track'
 
 # =============================================================================
-# SHIPS PARAMETERS GROUP (v9/v10)
+# SHIPS PARAMETERS GROUP
 # =============================================================================
 SHIPS_GROUP_NAME = 'ships_params'
 SHIPS_REQUIRED_ATTRS = {'obs_count', 'source', 'ships_atcf_id', 'ships_datetime_utc'}
@@ -181,14 +271,12 @@ def validate_json_sidecar(json_path, expected_h5_name):
 
 def validate_file(filepath):
     issues  = []
-    filename = os.path.basename(filepath) # 
+    filename = os.path.basename(filepath)
     
-    # --- V10: Check HDF5/JSON Pair Compatibility ---
     json_pair = filepath.replace('.hdf5', '.json')
     pair_issue = validate_json_sidecar(json_pair, filename)
     if pair_issue:
         issues.append(f"[PAIR] {pair_issue}")
-    # -----------------------------------------------
 
     summary = {
         'filename':   os.path.basename(filepath),
@@ -305,7 +393,6 @@ def validate_file(filepath):
                     if not is_nan_value(raw_val) and not isinstance(raw_val, (float, np.floating, int, np.integer)):
                         issues.append(f"[GLOBAL] '{attr}' must be a native numeric type. Got {type(raw_val)}")
 
-                # --- V10: Verify the internal metadata link to the JSON sidecar ---
                 elif attr == 'Virtual_Manifest':
                     val = decode_attr(raw_val)
                     expected_json = filename.replace('.hdf5', '.json')
@@ -314,7 +401,6 @@ def validate_file(filepath):
                             f"[GLOBAL] 'Virtual_Manifest' attribute ({val}) "
                             f"does not match actual filename ({expected_json})."
                         )
-                # ------------------------------------------------------------------
 
                 elif attr in ('existing_groups', 'expected_groups'):
                     if not is_nan_value(raw_val) and not isinstance(raw_val, (np.ndarray, list)):
@@ -402,7 +488,6 @@ def validate_file(filepath):
                         if bad > 0:
                             issues.append(f"[{key}/{item_name}] {bad} value(s) outside bounds [{lo}, {hi}].")
                     
-                    # --- NEW: V10 CF-Time Attribute Check ---
                     if item_name == 'time':
                         expected_units = 'seconds since 1900-01-01 00:00:00Z'
                         actual_units = decode_attr(dset.attrs.get('units', b''))
@@ -523,7 +608,7 @@ def validate_file(filepath):
             if 'tc_category' in f.attrs:
                 tc_val = decode_attr(f.attrs['tc_category']).strip()
                 if tc_val not in VALID_TC_CATEGORIES:
-                    issues.append(f"[GLOBAL] tc_category '{tc_val}' unrecognised.")
+                    issues.append(f"[GLOBAL] tc_category '{tc_val}' unrecognized.")
 
             for attr_name in f.attrs.keys():
                 attr_val = str(f.attrs[attr_name])
@@ -623,8 +708,8 @@ def validate_file(filepath):
 # RUNNER
 # =============================================================================
 
-def run_validation(target_dir, issues_report="validation_issues.csv", counts_report="validation_obs_counts.csv"):
-    print(f"🔍 Strict AI-Ready Validation (v10)")
+def run_validation(target_dir, issues_report=ISSUES_REPORT, counts_report=COUNTS_REPORT):
+    print(f"🔍 Strict AI-Ready Validation — HRDOBS v1.0")
     print(f"   Directory : {target_dir}")
     print(f"   Basin     : {_BASIN_LABEL.get(BASIN_FILTER, BASIN_FILTER)}")
     print(f"   Sentinels : {SENTINEL_VALUES}\n")
@@ -762,6 +847,4 @@ def run_validation(target_dir, issues_report="validation_issues.csv", counts_rep
                 print(f"   {col:<22}  {n_v:>6,}  {n_t:>6,}  {pct:>5.1f}%")
 
 if __name__ == "__main__":
-    TARGET_DIR = "AI_ready_dataset/HRDOBS_hdf5"
     run_validation(TARGET_DIR)
-    
